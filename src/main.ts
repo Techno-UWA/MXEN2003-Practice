@@ -3,6 +3,7 @@
 
 import { generateQuestion, getAvailableTopics, ALL_TOPICS, TOPIC_LABELS, type Question, type QuestionTopic } from './engine/generator';
 import { checkAnswer } from './engine/evaluator';
+import { parseExpression, renderExpressionDisplay } from './engine/expression-display';
 import { loadStats, recordAnswer, getLevelProgress, resetStats, formatTime, type Stats } from './engine/gamification';
 import './style.css';
 
@@ -72,11 +73,15 @@ function escapeHtml(s: string): string {
 }
 
 function simpleMarkdown(text: string): string {
-  return text
+  // First escape HTML to prevent << being interpreted as tags
+  let html = escapeHtml(text);
+  // Then apply markdown transforms on the escaped text
+  html = html
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/`{3}c\n([\s\S]*?)`{3}/g, '<pre class="code-block">$1</pre>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\n/g, '<br>');
+  return html;
 }
 
 function startTimer(): void {
@@ -157,11 +162,35 @@ function evaluateLive(inputValue: string): void {
 
   state.liveResult = result;
   updateLiveDisplay();
+  updateExpressionDisplay();
 
-  // Auto-submit if correct
+  // Auto-submit if correct AND semicolon present (for code questions)
   if (result.isCorrect) {
-    handleAutoSubmit();
+    // Read-state questions don't need semicolons; code questions do
+    if (q.isReadState || trimmed.endsWith(';')) {
+      handleAutoSubmit();
+    }
   }
+}
+
+function updateExpressionDisplay(): void {
+  const container = document.getElementById('expr-display-container');
+  if (!container) return;
+
+  const q = state.currentQuestion;
+  if (!q || q.isReadState || state.completed) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const trimmed = state.currentInput.trim();
+  if (!trimmed) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const breakdown = parseExpression(trimmed, q.register, q.initialValue);
+  container.innerHTML = renderExpressionDisplay(breakdown, q.initialValue);
 }
 
 function handleAutoSubmit(): void {
@@ -181,6 +210,9 @@ function handleAutoSubmit(): void {
     solveTimeMs,
     finalValue: q.expectedValue,
   };
+
+  // Auto-reveal sample answer
+  state.showAnswer = true;
 
   // Re-render to show completed state
   render();
@@ -348,37 +380,44 @@ function renderPractice(): string {
         ${renderBitDisplay(q.initialValue, q.register)}
       </div>
 
-      ${!state.completed ? renderInputSection(q) : renderCompletedSection()}
+      <div id="expr-display-container" class="expr-display-container"></div>
+
+      ${state.completed ? renderCompletedSection() : ''}
+
+      ${renderInputSection(q)}
     </div>
   `;
 }
 
 function renderInputSection(q: Question): string {
+  const isCompleted = !!state.completed;
   return `
-    <div class="answer-section">
+    <div class="answer-section ${isCompleted ? 'answer-completed' : ''}">
       ${q.isReadState ? `
         <div class="input-group">
-          <label class="input-label">Your answer (hex or binary):</label>
-          <input type="text" id="answer-input" class="code-input" 
+          <label class="input-label">${isCompleted ? 'Your answer:' : 'Your answer (hex or binary):'}</label>
+          <input type="text" id="answer-input" class="code-input ${isCompleted ? 'input-readonly' : ''}" 
                  placeholder="e.g. 0xAB or 10101011" autocomplete="off" spellcheck="false" 
-                 value="${escapeHtml(state.currentInput)}" />
+                 value="${escapeHtml(state.currentInput)}" ${isCompleted ? 'readonly' : ''} />
         </div>
       ` : `
         <div class="input-group">
-          <label class="input-label">Your code:</label>
-          <textarea id="answer-input" class="code-input code-textarea" 
-                    placeholder="e.g. ${escapeHtml(q.register)} |= (1<<3);" 
-                    rows="3" autocomplete="off" spellcheck="false">${escapeHtml(state.currentInput)}</textarea>
+          <label class="input-label">${isCompleted ? 'Your code:' : 'Your code:'}</label>
+          <textarea id="answer-input" class="code-input code-textarea ${isCompleted ? 'input-readonly' : ''}" 
+                    placeholder="e.g. ${escapeHtml(q.register)} |= (1&lt;&lt;3);" 
+                    rows="3" autocomplete="off" spellcheck="false" ${isCompleted ? 'readonly' : ''}>${escapeHtml(state.currentInput)}</textarea>
         </div>
       `}
-      <div class="answer-actions">
-        <button class="btn btn-secondary" id="btn-hint" ${state.showHint ? 'disabled' : ''}>
-          💡 Hint
-        </button>
-        <button class="btn btn-secondary" id="btn-cheatsheet">
-          📋 Cheatsheet
-        </button>
-      </div>
+      ${!isCompleted ? `
+        <div class="answer-actions">
+          <button class="btn btn-secondary" id="btn-hint" ${state.showHint ? 'disabled' : ''}>
+            💡 Hint
+          </button>
+          <button class="btn btn-secondary" id="btn-cheatsheet">
+            📋 Cheatsheet
+          </button>
+        </div>
+      ` : ''}
     </div>
   `;
 }
@@ -425,16 +464,10 @@ function renderCompletedSection(): string {
     </div>
 
     <div class="next-section">
-      ${state.showAnswer ? `
-        <div class="sample-answer-box">
-          <div class="sample-answer-label">Sample Answer:</div>
-          <pre class="code-block">${escapeHtml(q.sampleAnswer || 'N/A')}</pre>
-        </div>
-      ` : `
-        <button class="btn btn-secondary" id="btn-show-answer">
-          👁 Show Sample Answer
-        </button>
-      `}
+      <div class="sample-answer-box">
+        <div class="sample-answer-label">Sample Answer:</div>
+        <pre class="code-block">${escapeHtml(q.sampleAnswer || 'N/A')}</pre>
+      </div>
       <button class="btn btn-primary btn-large" id="btn-next">
         Next Question →
       </button>
@@ -446,7 +479,8 @@ function renderCompletedSection(): string {
 function renderDashboard(): string {
   const s = state.stats;
   const progress = getLevelProgress(s);
-
+  const sc = s.speedCounts || { lightning: 0, blazing: 0, quick: 0, steady: 0 };
+  const totalSolves = sc.lightning + sc.blazing + sc.quick + sc.steady;
 
   return `
     <div class="dashboard">
@@ -462,9 +496,9 @@ function renderDashboard(): string {
         </div>
 
         <div class="dash-card">
-          <div class="dash-card-title">Questions</div>
+          <div class="dash-card-title">Solved</div>
           <div class="dash-card-value">${s.totalQuestions}</div>
-          <div class="dash-card-sub">${s.correctAnswers} correct</div>
+          <div class="dash-card-sub">questions completed</div>
         </div>
 
         <div class="dash-card">
@@ -481,24 +515,52 @@ function renderDashboard(): string {
         </div>
       </div>
 
+      <div class="speed-distribution">
+        <h3>Speed Distribution</h3>
+        ${totalSolves > 0 ? `
+          <div class="speed-dist-grid">
+            ${[
+        { label: '⚡ Lightning', count: sc.lightning, cls: 'speed-lightning' },
+        { label: '🔥 Blazing', count: sc.blazing, cls: 'speed-blazing' },
+        { label: '✨ Quick', count: sc.quick, cls: 'speed-quick' },
+        { label: '✓ Steady', count: sc.steady, cls: 'speed-steady' },
+      ].map(({ label, count, cls }) => {
+        const pct = Math.round((count / totalSolves) * 100);
+        return `
+                <div class="speed-dist-row">
+                  <span class="speed-dist-label ${cls}">${label}</span>
+                  <div class="speed-dist-bar-bg">
+                    <div class="speed-dist-bar-fill ${cls}" style="width: ${pct}%"></div>
+                  </div>
+                  <span class="speed-dist-count">${count}</span>
+                </div>
+              `;
+      }).join('')}
+          </div>
+        ` : '<p class="dash-empty">Solve some questions to see your speed breakdown!</p>'}
+      </div>
+
       <div class="topic-breakdown">
         <h3>Topic Breakdown</h3>
         <div class="topic-stats-grid">
           ${ALL_TOPICS.map(t => {
-    const ts = s.topicStats[t];
-    const pct = ts ? Math.round((ts.correct / ts.total) * 100) : 0;
-    const total = ts?.total || 0;
-    return `
+        const ts = s.topicStats[t];
+        const total = ts?.total || 0;
+        const avgTime = ts && ts.totalTime ? Math.round(ts.totalTime / ts.total) : 0;
+        const bestTime = ts?.bestTime || 0;
+        // Bar shows relative speed: faster = fuller bar (cap at 30s)
+        const barPct = avgTime > 0 ? Math.max(5, Math.round((1 - Math.min(avgTime, 30000) / 30000) * 100)) : 0;
+        return `
               <div class="topic-stat-row">
                 <span class="topic-stat-name">${TOPIC_LABELS[t]}</span>
                 <div class="topic-stat-bar-bg">
-                  <div class="topic-stat-bar-fill" style="width: ${pct}%"></div>
+                  <div class="topic-stat-bar-fill" style="width: ${barPct}%"></div>
                 </div>
-                <span class="topic-stat-pct">${total > 0 ? `${pct}%` : '—'}</span>
-                <span class="topic-stat-count">${total} done</span>
+                <span class="topic-stat-pct">${total > 0 ? formatTime(avgTime) : '—'}</span>
+                <span class="topic-stat-count">${total > 0 ? `${total} solved${bestTime > 0 ? ` · best ${formatTime(bestTime)}` : ''}` : 'not started'}</span>
               </div>
             `;
-  }).join('')}
+      }).join('')}
         </div>
       </div>
 

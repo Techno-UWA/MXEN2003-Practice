@@ -10,11 +10,12 @@ export interface Stats {
     bestStreak: number;
     xp: number;
     level: number;
-    topicStats: Record<string, { total: number; correct: number }>;
+    topicStats: Record<string, { total: number; correct: number; totalTime: number; bestTime: number }>;
     lastSessionDate: string;
     dailyStreak: number;
     fastestTime: number; // fastest solve in ms
     averageTime: number; // rolling average solve time in ms
+    speedCounts: { lightning: number; blazing: number; quick: number; steady: number };
 }
 
 function defaultStats(): Stats {
@@ -30,6 +31,7 @@ function defaultStats(): Stats {
         dailyStreak: 0,
         fastestTime: 0,
         averageTime: 0,
+        speedCounts: { lightning: 0, blazing: 0, quick: 0, steady: 0 },
     };
 }
 
@@ -88,10 +90,19 @@ export function recordAnswer(
 
     // Update topic stats
     if (!stats.topicStats[topic]) {
-        stats.topicStats[topic] = { total: 0, correct: 0 };
+        stats.topicStats[topic] = { total: 0, correct: 0, totalTime: 0, bestTime: 0 };
     }
     stats.topicStats[topic].total++;
     stats.topicStats[topic].correct++;
+    stats.topicStats[topic].totalTime += solveTimeMs;
+    if (stats.topicStats[topic].bestTime === 0 || solveTimeMs < stats.topicStats[topic].bestTime) {
+        stats.topicStats[topic].bestTime = solveTimeMs;
+    }
+
+    // Track speed category
+    if (!stats.speedCounts) stats.speedCounts = { lightning: 0, blazing: 0, quick: 0, steady: 0 };
+    const speedCat = getSpeedCategory(solveTimeMs);
+    stats.speedCounts[speedCat]++;
 
     // Update daily streak
     const today = new Date().toISOString().split('T')[0];
@@ -168,9 +179,14 @@ export function recordAnswer(
     };
 }
 
-export function getAccuracy(stats: Stats): number {
-    if (stats.totalQuestions === 0) return 0;
-    return Math.round((stats.correctAnswers / stats.totalQuestions) * 100);
+export type SpeedCategory = 'lightning' | 'blazing' | 'quick' | 'steady';
+
+export function getSpeedCategory(solveTimeMs: number): SpeedCategory {
+    const seconds = solveTimeMs / 1000;
+    if (seconds < 3) return 'lightning';
+    if (seconds < 6) return 'blazing';
+    if (seconds < 12) return 'quick';
+    return 'steady';
 }
 
 export function resetStats(): Stats {
